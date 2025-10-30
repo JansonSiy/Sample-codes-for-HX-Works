@@ -1,0 +1,36 @@
+# This is how we create objects for unit tests in Yeoki.
+
+import factory
+from factory.django import DjangoModelFactory
+
+from crm.factories import ContactFactory
+from marketplace.factories import MarketplaceFactory
+from old_gold_purchases.models import CustomerPurchase, CustomerPurchaseItem
+from stock.factories import MaterialFactory
+
+
+class CustomerPurchaseFactory(DjangoModelFactory):
+    marketplace = factory.SubFactory(MarketplaceFactory)
+    purchase_id = factory.Faker("uuid4")
+    contact = factory.SubFactory(ContactFactory)
+    currency = "USD"
+    price = 0
+
+    class Meta:
+        model = CustomerPurchase
+        django_get_or_create = ("purchase_id",)
+
+
+class CustomerPurchaseItemFactory(DjangoModelFactory):
+    customer_purchase = factory.SubFactory(CustomerPurchaseFactory)
+    purchase_item_id = factory.Faker("uuid4")
+    weight = 1.0
+    weight_unit = "g"
+    price = 1.0
+    currency = "USD"
+    price_per_weight_unit = 1.0
+    material = factory.SubFactory(MaterialFactory)
+
+    class Meta:
+        model = CustomerPurchaseItem
+        django_get_or_create = ("purchase_item_id",)
