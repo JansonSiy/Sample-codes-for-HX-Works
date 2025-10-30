@@ -1,0 +1,14 @@
+# Just a basic url sample
+
+from django.urls import path
+
+from . import views
+
+urlpatterns = [
+    path("categories/", views.BrowseNodeListView.as_view(), name="browsenode_list"),
+    path(
+        "category/<int:pk>",
+        views.BrowseNodeDetailView.as_view(),
+        name="browsenode_detail",
+    ),
+]
