@@ -1,0 +1,68 @@
+# This is how we setup filters.py that the views.py absorbs
+# We use FormHelper to customize the design of our forms.
+
+import django_filters
+from crispy_forms.helper import FormHelper
+from crispy_forms.layout import Div, Layout
+from django.db.models import Q
+from django.forms import HiddenInput, Select
+from django.utils.translation import gettext_lazy as _
+
+from core.constants import DEFAULT_FORM_FIELD_WRAPPER_CLASS, YES_NO_CHOICES
+from core.filters import DateFromToRangeFilter
+from core.translation_utils import SEARCH_TRANSLATION
+from core.widgets import CustomRangeWidget
+
+from .models import Brand
+
+
+class BrandFilter(django_filters.FilterSet):
+    search = django_filters.CharFilter(method="filter_by_search", widget=HiddenInput())
+    created = DateFromToRangeFilter(
+        widget=CustomRangeWidget(attrs={"class": "datepicker", "type": "date"}), label=_("Created")
+    )
+    flagged = django_filters.BooleanFilter(
+        widget=Select(
+            choices=YES_NO_CHOICES,
+            attrs={
+                "class": "y_select",
+                "data-placeholder": "---------",
+            },
+        ),
+        label=_("Flagged"),
+    )
+
+    class Meta:
+        model = Brand
+        fields = ["search", "flagged", "hide_on_website"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.filters["search"].label = SEARCH_TRANSLATION
+
+        self.form.helper = FormHelper()
+        self.form.helper.form_method = "GET"
+        self.form.helper.layout = Layout(
+            "created",
+            Div(
+                Div(
+                    "created_by",
+                    css_class="col-span-6",
+                ),
+                Div(
+                    "flagged",
+                    css_class="col-span-6",
+                ),
+                css_class=DEFAULT_FORM_FIELD_WRAPPER_CLASS,
+            ),
+            Div(
+                Div(
+                    "hide_on_website",
+                    css_class="col-span-6",
+                ),
+                css_class=DEFAULT_FORM_FIELD_WRAPPER_CLASS,
+            ),
+        )
+
+    def filter_by_search(self, queryset, name, value):
+        return queryset.filter(Q(name__icontains=value)).distinct()
