@@ -1,0 +1,182 @@
+# This is how we write unit tests in Yeoki.
+# This contains tests related to views.py.
+
+import datetime
+import os
+
+from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.urls import reverse
+from ycommon.y_currencies.factories import CurrencyFactory
+
+from business.factories import BusinessFactory
+from crm.factories import ContactFactory
+from giftcards.factories import GiftcardFactory
+from giftcards.models import Giftcard
+from marketplace.factories import MarketplaceFactory
+from old_gold_purchases.factories import CustomerPurchaseFactory, CustomerPurchaseItemFactory
+from old_gold_purchases.models import CustomerPurchase, CustomerPurchaseDocument, IDCardImage
+from tests.core.testcases import YTestCase
+
+
+class CustomerPurchaseViews(YTestCase):
+    def setUp(self):
+        super().setUp()
+        self.client.force_login(User.objects.get_or_create(username="testuser", is_superuser=True)[0])
+        self.customer_purchase = CustomerPurchaseFactory()
+        CurrencyFactory.create_batch(10)
+        self.image_path = os.path.join(os.path.dirname(__file__), "fixtures", "test_image.jpg")
+        self.pdf_path = os.path.join(os.path.dirname(__file__), "fixtures", "test.pdf")
+        self.id_card_images_template = "customer_purchases/id_card_images.html"
+
+    def upload_image(self, file_path, file_name, content_type):
+        with open(file_path, "rb") as image_file:
+            image = SimpleUploadedFile(name=file_name, content=image_file.read(), content_type=content_type)
+
+            response = self.client.post(
+                path=reverse("customer_purchases:create_id_card_image"),
+                data={"image": image, "customer_purchase": self.customer_purchase.id},
+                follow=True,
+            )
+
+        return response
+
+    def test_customer_purchase_dashboard(self):
+        response = self.client.get(path=reverse("customer_purchases:customerpurchase_list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "core/generic_listview_template.html")
+
+    def test_customer_purchase_detailview(self):
+        response = self.client.get(path=self.customer_purchase.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "customer_purchases/customerpurchase_detail.html")
+
+    def test_not_visible_contact_id_number_in_detailview(self):
+        self.assertEqual(CustomerPurchase.objects.count(), 1)
+        self.assertEqual(self.customer_purchase.contact_id_number, None)
+
+        response = self.client.get(path=self.customer_purchase.get_absolute_url())
+
+        self.assertNotContains(response, self.customer_purchase.contact_id_number)
+
+    def test_visible_contact_id_number_in_detailview(self):
+        self.assertEqual(CustomerPurchase.objects.count(), 1)
+
+        self.customer_purchase.contact_id_number = "123ABC"
+        self.customer_purchase.save()
+
+        response = self.client.get(path=self.customer_purchase.get_absolute_url())
+
+        self.assertContains(response, self.customer_purchase.contact_id_number)
+
+    def test_update_customer_purchase(self):
+        new_contact = ContactFactory()
+        new_marketplace = MarketplaceFactory(
+            marketplace="New marketplace",
+            business=BusinessFactory(name="New business"),
+        )
+
+        response = self.client.post(
+            path=reverse(
+                "core:generic_update_view", args=["update_customer_purchase_form", self.customer_purchase.id]
+            ),
+            data={
+                "marketplace": new_marketplace.id,
+                "purchase_id": "new-purchase-id",
+                "contact": new_contact.id,
+                "contact_id_number": "new-contact-id-number",
+                "birth_date": "2001-01-01",
+                "bank_number": "new-bank-number",
+                "currency": "EUR",
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 204)
+
+        customer_purchases = CustomerPurchase.objects.all()
+        customer_purchase = customer_purchases.first()
+
+        self.assertEqual(customer_purchases.count(), 1)
+        self.assertEqual(customer_purchase.marketplace, new_marketplace)
+        self.assertEqual(customer_purchase.purchase_id, "new-purchase-id")
+        self.assertEqual(customer_purchase.contact, new_contact)
+        self.assertEqual(customer_purchase.contact_id_number, "new-contact-id-number")
+        self.assertEqual(customer_purchase.birth_date, datetime.date(2001, 1, 1))
+        self.assertEqual(customer_purchase.bank_number, "new-bank-number")
+        self.assertEqual(customer_purchase.currency, "EUR")
+
+    def test_uploading_of_image(self):
+        response = self.upload_image(self.image_path, "test_image.jpg", "image/jpeg")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, self.id_card_images_template)
+
+        id_card_image = IDCardImage.objects.first()
+        self.assertContains(response, id_card_image.image.url)
+        self.assertIsNotNone(id_card_image.image)
+        self.assertIsNotNone(id_card_image.image_thumb)
+        self.assertEqual(id_card_image.customer_purchase, self.customer_purchase)
+
+    def test_uploading_of_pdf(self):
+        response = self.upload_image(self.pdf_path, "test.pdf", "application/pdf")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, self.id_card_images_template)
+
+        id_card_image = IDCardImage.objects.first()
+        self.assertContains(response, id_card_image.image.url)
+        self.assertIsNotNone(id_card_image.image)
+        self.assertEqual(id_card_image.image_thumb, "")
+        self.assertEqual(id_card_image.customer_purchase, self.customer_purchase)
+
+    def test_delete_image_field_value(self):
+        file_data = [
+            (self.image_path, "test_image.jpg", "image/jpeg"),
+            (self.pdf_path, "test.pdf", "application/pdf"),
+        ]
+
+        for file_path, file_name, content_type in file_data:
+            self.upload_image(file_path, file_name, content_type)
+            uploaded_id_card_image = IDCardImage.objects.first()
+
+            response = self.client.post(
+                path=reverse(
+                    "core:generic_delete_view",
+                    args=["old_gold_purchases", "idcardimage", uploaded_id_card_image.pk, "false"],
+                )
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(IDCardImage.objects.filter(id=uploaded_id_card_image.id).exists())
+
+    def test_create_customerpurchasedocument(self):
+        customer_purchase_document = CustomerPurchaseDocument.objects.all()
+        self.assertEqual(customer_purchase_document.count(), 0)
+
+        response = self.client.get(
+            path=reverse("customer_purchases:create_customerpurchasedocument", args=[self.customer_purchase.id]),
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(customer_purchase_document.filter(customer_purchase=self.customer_purchase).count(), 1)
+
+    def test_items_and_giftcards_count_accuracy_in_detailview(self):
+        CustomerPurchaseItemFactory(customer_purchase=self.customer_purchase)
+        CustomerPurchaseItemFactory()
+
+        GiftcardFactory(customer_purchase=self.customer_purchase)
+        GiftcardFactory()
+
+        self.assertEqual(CustomerPurchase.objects.count(), 2)
+        self.assertEqual(Giftcard.objects.count(), 2)
+
+        response = self.client.get(self.customer_purchase.get_absolute_url())
+        self.assertEqual(response.status_code, 200)
+
+        items_count = self.customer_purchase.customerpurchaseitem_set.count()
+        self.assertEqual(items_count, 1)
+        self.assertIn(f"Items ({items_count})", response.content.decode())
+
+        giftcards_count = self.customer_purchase.giftcard_set.count()
+        self.assertEqual(giftcards_count, 1)
+        self.assertIn(f"Giftcards ({giftcards_count})", response.content.decode())
