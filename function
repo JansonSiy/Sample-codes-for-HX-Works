@@ -1,0 +1,66 @@
+# This function allows users to customize automatic generation of product SKUs.
+
+# Example:
+# If a user sets -> ((year))-((random_4)), the output would 2025-1234, if it exists, we spit out 2025-1234-1.
+# 1 in 2025-1234-1 will continue to increment until we find a unique one.
+
+@staticmethod
+def get_available_sku(prefix="", suffix=""):
+    system_info = get_system_info()
+    sku_generation_strategy = system_info.sku_generation_strategy
+
+    if sku_generation_strategy:
+        if "((year))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace("((year))", timezone.now().strftime("%Y"))
+
+        if "((year_2_digits))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace(
+                "((year_2_digits))", timezone.now().strftime("%y")
+            )
+
+        if "((month))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace("((month))", timezone.now().strftime("%m"))
+
+        if "((day))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace("((day))", timezone.now().strftime("%d"))
+
+        if "((counter))" in sku_generation_strategy:
+            generic_config = GenericConfig.load()
+            counter = Product.objects.count() + 1
+
+            if generic_config.sku_counter_start:
+                counter += generic_config.sku_counter_start
+
+            sku_generation_strategy = sku_generation_strategy.replace("((counter))", str(counter))
+
+        if "((yearly_counter))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace(
+                "((yearly_counter))", str(Product.objects.filter(created__year=timezone.now().year).count() + 1)
+            )
+
+        if "((random_4))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace(
+                "((random_4))", str(random.randint(1000, 9999))
+            )
+
+        if "((random_5))" in sku_generation_strategy:
+            sku_generation_strategy = sku_generation_strategy.replace(
+                "((random_5))", str(random.randint(10000, 99999))
+            )
+
+        attempts = 1
+
+        while Product.objects.filter(item_sku=sku_generation_strategy).exists() and attempts < 1000:
+            sku_generation_strategy = f"{sku_generation_strategy}-{attempts}"
+            attempts += 1
+
+        return sku_generation_strategy
+    else:
+        random_number = f"{prefix}{str(random.randint(1000, 9999999))}{suffix}"
+        attempts = 0
+
+        while Product.objects.filter(item_sku=random_number).exists() and attempts < 1000:
+            random_number = f"{prefix}{str(random.randint(1000, 9999999))}{suffix}"
+            attempts += 1
+
+        return random_number
