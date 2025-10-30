@@ -1,0 +1,45 @@
+# This is how I wrote tables. Inheriting YeokiTable adds other features like select box and etc.
+
+from django.template.loader import render_to_string
+
+import django_tables2 as tables
+from core.constants import ACTIONS_COMPONENT_PATH
+from core.mixins import YeokiTable
+
+from .models import Brand
+
+
+class BrandsTable(YeokiTable):
+    name = tables.Column(linkify=True)
+    actions = tables.Column(
+        empty_values=[],
+        exclude_from_export=True,
+        accessor="render_actions",
+        orderable=False,
+    )
+
+    class Meta:
+        model = Brand
+        fields = [
+            "select",
+            "name",
+            "product_count",
+            "created",
+            "hide_on_website",
+            "actions",
+        ]
+
+        row_attrs = YeokiTable.row_attrs()
+
+    def render_actions(self, record):
+        context = {
+            "object": record,
+            "show_edit": "true",
+            "show_delete": "true",
+            "show_flag": "true",
+            "delete_selector": "closest tr",
+            "update_model_form": "update_brand_form",
+            "style": "ellipsis",
+        }
+
+        return render_to_string(ACTIONS_COMPONENT_PATH, context)
