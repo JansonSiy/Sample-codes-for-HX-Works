@@ -1,0 +1,72 @@
+# This is an example of how I wrote forms. Included here is how we handle validations and design.
+
+import logging
+
+from crispy_forms.helper import FormHelper
+from crispy_forms.layout import HTML, Div, Layout
+from django import forms
+from django.template.loader import render_to_string
+from django.utils.translation import gettext_lazy as _
+
+from core.constants import DEFAULT_FORM_FIELD_WRAPPER_CLASS, DEFAULT_SELECT_PLACEHOLDER
+from stock.models import Product
+
+from .models import BrowseNode, CategoryTranslation
+
+logger = logging.getLogger("django")
+
+
+class CategoryForm(forms.ModelForm):
+    class Meta:
+        model = BrowseNode
+        fields = [
+            "name",
+            "mother_category",
+            "code",
+            "shopify_category",
+            "image",
+            "description",
+            "hide_on_website",
+        ]
+
+        widgets = {
+            "mother_category": forms.Select(
+                attrs={
+                    "data-placeholder": DEFAULT_SELECT_PLACEHOLDER,
+                }
+            ),
+            "shopify_category": forms.Select(
+                attrs={
+                    "data-placeholder": DEFAULT_SELECT_PLACEHOLDER,
+                }
+            ),
+            "description": forms.Textarea(
+                attrs={
+                    "rows": 2,
+                }
+            ),
+            "image": forms.ClearableFileInput(attrs={"class": render_to_string("classes/file_input.html")}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if self.instance.pk:
+            # if not, exclude the instance from the mother category queryset
+            self.fields["mother_category"].queryset = BrowseNode.objects.exclude(pk=self.instance.pk)
+
+        self.fields["name"].widget.attrs["autofocus"] = True
+
+    def clean_mother_category(self):
+        """Make sure that a category cannot be its own mother category."""
+        mother_category = self.cleaned_data["mother_category"]
+        if mother_category == self.instance:
+            raise forms.ValidationError(_("A category cannot be its own mother category"))
+        return mother_category
+
+    def clean_name(self):
+        """Make sure that a category with the same name does not already exist."""
+        name = self.cleaned_data["name"]
+        if BrowseNode.objects.filter(name__iexact=name).exclude(pk=self.instance.pk).exists():
+            raise forms.ValidationError(_("A category with that name already exists"))
+        return name
