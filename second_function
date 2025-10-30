@@ -1,0 +1,108 @@
+# This is a feature that duplicates products.
+# We ensure that all relationships are copied over.
+# As well as the user being redirected to the new product page along with some nice notifications.
+
+@user_permissions_required(STOCK_ADD_PERMISSION)
+def duplicate_product(request, pk):
+    product = get_object_or_404(Product, pk=pk)
+
+    product.pk = None
+
+    item_sku_base = f"{product.item_sku}-copy"
+    item_sku = item_sku_base
+
+    if Product.objects.filter(item_sku=item_sku).exists():
+        attempts = 1
+        item_sku = f"{item_sku_base}-{attempts}"
+
+        while Product.objects.filter(item_sku=item_sku).exists():
+            attempts += 1
+            item_sku = f"{item_sku_base}-{attempts}"
+
+    product.item_sku = item_sku
+
+    product.uuid = uuid.uuid4()
+
+    random_number = randint(1000000, 9999999)
+    attempts = 0
+    while Product.objects.filter(yeoki_code_ean8=random_number).exists() and attempts < 1000:
+        random_number = randint(1000000, 9999999)
+        attempts += 1
+
+    product.yeoki_code_ean8 = random_number
+    product.woocommerce_id = None
+    product.serial_number = None
+    product.shopify_id = None
+    product.save()
+
+    original_product = Product.objects.get(pk=pk)
+
+    save_to_chatter(
+        object=product,
+        comment=_("Duplicated {}").format(original_product.item_sku),
+        author=request.user,
+    )
+
+    product_images = ProductImage.objects.filter(product=original_product)
+    for product_image in product_images:
+        product_image.pk = None
+        product_image.product = product
+        product_image.uuid = uuid.uuid4()
+        product_image.woocommerce_id = None
+        product_image.shopify_id = None
+        product_image.prestashop_id = None
+        product_image.save()
+
+    product_attributes = ProductAttribute.objects.filter(product=original_product)
+    for product_attribute in product_attributes:
+        product_attribute.pk = None
+        product_attribute.product = product
+        product_attribute.uuid = uuid.uuid4()
+        product_attribute.save()
+
+    product_costs = ProductCost.objects.filter(product=original_product)
+    for product_cost in product_costs:
+        product_cost.pk = None
+        product_cost.product = product
+        product_cost.uuid = uuid.uuid4()
+        product_cost.save()
+
+    collections = original_product.collections.all()
+    for collection in collections:
+        product.collections.add(collection)
+
+    product_suppliers = original_product.suppliers.all()
+    for product_supplier in product_suppliers:
+        product.suppliers.add(product_supplier)
+
+    product_supplier_references = SupplierReference.objects.filter(product=original_product)
+    for product_supplier_reference in product_supplier_references:
+        product_supplier_reference.pk = None
+        product_supplier_reference.product = product
+        product_supplier_reference.uuid = uuid.uuid4()
+        product_supplier_reference.save()
+
+    product_descriptions = ProductDescription.objects.filter(product=original_product)
+    # delete the auto generated empty description
+    ProductDescription.objects.filter(product=product).delete()
+    for product_description in product_descriptions:
+        product_description.pk = None
+        product_description.product = product
+        product_description.uuid = uuid.uuid4()
+        product_description.save()
+
+    PricingRule.objects.filter(product=product).delete()
+    pricing_rules = PricingRule.objects.filter(product=original_product)
+    for pricing_rule in pricing_rules:
+        pricing_rule.pk = None
+        pricing_rule.product = product
+        pricing_rule.uuid = uuid.uuid4()
+        pricing_rule.save()
+
+    categories = original_product.categories.all()
+    for category in categories:
+        product.categories.add(category)
+
+    messages.success(request, _("Product was successfully duplicated."))
+
+    return redirect(product.get_absolute_url())
