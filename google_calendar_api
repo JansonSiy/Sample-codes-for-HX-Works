@@ -1,0 +1,224 @@
+# This is a sample of the Google Calendar API I worked on. However, my boss seems to have updated several code blocks. So this is not my 100% work anymore.
+
+"""Syncing events with Google Calendar API.
+
+Docs for Using OAuth 2.0 for Web Server Applications:
+https://developers.google.com/identity/protocols/oauth2/web-server
+
+Prerequisites
+https://developers.google.com/identity/protocols/oauth2/web-server#prerequisites
+
+Obtaining Access Tokens
+https://developers.google.com/identity/protocols/oauth2/web-server#obtainingaccesstokens
+"""
+
+import logging
+from datetime import datetime, timedelta
+
+from django.contrib import messages
+from django.utils import timezone
+from django.utils.translation import gettext as _
+from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
+
+from core.g_cloud import build_gcalendar_service, start_g_flow
+from core.utils import get_system_info
+from crm.models import Contact
+
+from .constants import G_DATE_FORMAT
+from .models import Agenda, Event, EventAttendee
+from .utils import parse_date
+
+logger = logging.getLogger("django")
+
+
+def sync_google_and_db_events(request=None, agenda_id=None):
+    """
+    Synchronizes events between Google Calendar and the local DB.
+
+    - Fetches events from the last 5 days to the next 30 days
+    - Adds new Google Calendar events to the DB
+    - Deletes DB events missing in Google Calendar
+    - Updates DB/Google events if one is newer than the other
+    """
+    if agenda_id:
+        agenda_qs = Agenda.objects.filter(id=agenda_id).exclude(gcalendar=False)
+    else:
+        agenda_qs = Agenda.objects.all().exclude(gcalendar=False)
+
+    system_info = get_system_info()
+
+    for agenda in agenda_qs:
+        gcalendar_service = build_gcalendar_service(agenda)
+        if isinstance(gcalendar_service, str):  # Error message
+            return gcalendar_service
+        if not gcalendar_service:
+            continue
+
+        logger.info(f"Syncing events for agenda: {agenda}")
+
+        db_events = Event.objects.filter(
+            start_date__date__gte=timezone.now().date() - timedelta(days=5),
+            end_date__date__lte=timezone.now().date() + timedelta(days=30),
+            agenda=agenda,
+        )
+        db_event_ids = {e.google_calendar_event_id for e in db_events}
+
+        time_min = (datetime.today() - timedelta(days=5)).isoformat() + "Z"
+        time_max = (datetime.today() + timedelta(days=30)).isoformat() + "Z"
+
+        try:
+            g_events_response = (
+                gcalendar_service.events()
+                .list(
+                    calendarId="primary",
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                )
+                .execute()
+            )
+        except RefreshError as e:
+            logger.exception(f"RefreshError: {e} for agenda: {agenda}")
+            if request:
+                messages.error(request, _("Please reconnect to Google Calendar"))
+                messages.error(request, str(agenda))
+                return start_g_flow(g_type="calendar", email=agenda.google_email)
+            continue
+
+        google_events = g_events_response.get("items", [])
+        google_event_ids = {event.get("id") for event in google_events}
+        logger.info(f"Found {len(google_events)} events in Google Calendar")
+
+        # DELETE events from DB that no longer exist in Google Calendar
+        for event in db_events:
+            if event.google_calendar_event_id not in google_event_ids:
+                event.delete()
+
+        # CREATE DB events from Google Calendar
+        for g_event in google_events:
+            if g_event.get("status") == "cancelled" or g_event.get("eventType") == "birthday":
+                continue
+
+            g_event_id = g_event.get("id")
+            if g_event_id in db_event_ids:
+                continue
+
+            is_all_day = bool(g_event.get("start", {}).get("date")) and bool(g_event.get("end", {}).get("date"))
+            start = parse_date(g_event.get("start"))
+            end = parse_date(g_event.get("end"))
+
+            event, created = Event.objects.get_or_create(
+                google_calendar_event_id=g_event_id,
+                defaults={
+                    "event_name": g_event.get("summary"),
+                    "start_date": start,
+                    "end_date": end,
+                    "all_day": is_all_day,
+                },
+            )
+            event.agenda = agenda
+            # get attendees from g_event and add them to the event
+            attendees = g_event.get("attendees", [])
+            for attendee in attendees:
+                if attendee.get("email"):
+                    # check if contact with this email exists
+                    try:
+                        contact = Contact.objects.get(email=attendee["email"])
+                    except Contact.DoesNotExist:
+                        contact = None
+                    logger.info(attendee)
+                    EventAttendee.objects.get_or_create(
+                        event=event,
+                        contact=contact,
+                        email=attendee["email"],
+                        defaults={
+                            "name": attendee.get("displayName"),
+                            "status": attendee.get("responseStatus"),
+                            "response_status": attendee.get("responseStatus"),
+                        },
+                    )
+
+        # CREATE Google events from DB if missing
+        for event in db_events:
+            if not event.google_calendar_event_id:
+                event_data = {
+                    "summary": event.event_name,
+                    "start": {
+                        "dateTime": event.start_date.strftime(G_DATE_FORMAT),
+                        "timeZone": system_info.timezone,
+                    },
+                    "end": {
+                        "dateTime": event.end_date.strftime(G_DATE_FORMAT),
+                        "timeZone": system_info.timezone,
+                    },
+                }
+                created_event = (
+                    gcalendar_service.events()
+                    .insert(calendarId="primary", body=event_data, sendNotifications=True)
+                    .execute()
+                )
+                event.google_calendar_event_id = created_event["id"]
+                event.save()
+
+        # UPDATE newer events from Google Calendar → DB or vice versa
+        updated_events = []
+        for g_event in google_events:
+            if g_event.get("status") == "cancelled" or g_event.get("eventType") == "birthday":
+                continue
+
+            g_event_id = g_event.get("id")
+            if g_event_id not in db_event_ids:
+                continue
+
+            try:
+                db_event = Event.objects.get(google_calendar_event_id=g_event_id)
+            except Event.DoesNotExist:
+                continue
+
+            g_updated = datetime.fromisoformat(g_event["updated"])
+            db_updated = db_event.updated
+
+            if g_updated > db_updated:
+                logger.info(f"Google event is newer than DB event for: {g_event_id}")
+                if g_event.get("start", {}).get("dateTime"):
+                    db_event.start_date = datetime.fromisoformat(g_event["start"]["dateTime"])
+                    db_event.end_date = datetime.fromisoformat(g_event["end"]["dateTime"])
+                else:
+                    db_event.start_date = datetime.strptime(parse_date(g_event["start"]), G_DATE_FORMAT)
+                    db_event.end_date = datetime.strptime(parse_date(g_event["end"]), G_DATE_FORMAT)
+
+                db_event.event_name = g_event.get("summary")
+                updated_events.append(db_event)
+
+            elif g_updated < db_updated and db_event.updated_since_last_sync:
+                logger.info(f"DB event is newer than Google event for: {g_event_id}")
+                try:
+                    if db_event.all_day:
+                        g_event["start"]["date"] = db_event.start_date.strftime("%Y-%m-%d")
+                        g_event["end"]["date"] = db_event.end_date.strftime("%Y-%m-%d")
+                    else:
+                        g_event["start"]["dateTime"] = db_event.start_date.strftime(G_DATE_FORMAT)
+                        g_event["end"]["dateTime"] = db_event.end_date.strftime(G_DATE_FORMAT)
+                    g_event["summary"] = db_event.event_name
+
+                    gcalendar_service.events().update(calendarId="primary", eventId=g_event_id, body=g_event).execute()
+                    db_event.updated_since_last_sync = False
+                    updated_events.append(db_event)
+                except HttpError as e:
+                    if e.resp.status == 403:
+                        error_detail = e.content.decode() if hasattr(e.content, "decode") else str(e.content)
+                        logger.warning(f"HttpError 403: {error_detail} for agenda: {agenda}")
+                    else:
+                        raise
+
+        Event.objects.bulk_update(updated_events, ["event_name", "start_date", "end_date", "updated_since_last_sync"])
+
+        if request:
+            messages.success(request, _("Events synced for agenda: {}").format(agenda.google_email))
+
+        agenda.last_synced = timezone.now()
+        agenda.save()
+        logger.info(f"Finished syncing agenda: {agenda}")
+
+    return {"success": True}
